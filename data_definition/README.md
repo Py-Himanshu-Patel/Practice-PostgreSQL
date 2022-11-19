@@ -473,7 +473,32 @@ ALTER TABLE table_name OWNER TO new_owner;
 ```
 Superusers can always do this; ordinary roles can only do it if they are both the current owner of the object (or a member of the owning role) and a member of the new owning role.
 
+To assign privileges, the `GRANT` command is used. For example, if joe is an existing role, and accounts is an existing table, the privilege to update the table can be granted with:
+```sql
+GRANT UPDATE ON accounts TO joe;
+```
+Writing `ALL` in place of a specific privilege grants all privileges that are relevant for the object type. The special “role” name PUBLIC can be used to grant a privilege to every role on the system. 
+```sql
+REVOKE ALL ON accounts FROM PUBLIC;
+```
+Ordinarily, only the object's owner (or a superuser) can grant or revoke privileges on an object. However, it is possible to grant a privilege “with grant option”, which gives the recipient the right to grant it in turn to others. If the grant option is subsequently revoked then all who received the privilege from that recipient (directly or through a chain of grants) will lose the privilege.
 
+```sql
+GRANT SELECT ON mytable TO PUBLIC;
+GRANT SELECT, UPDATE, INSERT ON mytable TO admin;
+GRANT SELECT (col1), UPDATE (col1) ON mytable TO miriam_rw;
+```
+Then psql's `\dp` command would show:
+```sql
+=> \dp mytable
+                                  Access privileges
+ Schema |  Name   | Type  |   Access privileges   |   Column privileges   | Policies
+--------+---------+-------+-----------------------+-----------------------+----------
+ public | mytable | table | miriam=arwdDxt/miriam+| col1:                +|
+        |         |       | =r/miriam            +|   miriam_rw=rw/miriam |
+        |         |       | admin=arw/miriam      |                       |
+(1 row)
+```
 
 ---
 
@@ -507,6 +532,10 @@ gorm=# \du
 Noice that the roles that start with with `pg_` are system roles.
 
 ### Create Roles
+
+Useful Link : [AWS Doc on how to create and assign roles with different permission to users](https://aws.amazon.com/blogs/database/managing-postgresql-users-and-roles/#:~:text=Users%2C%20groups%2C%20and%20roles%20are,for%20the%20CREATE%20ROLE%20statement.)
+
+CREATE USER = CREATE ROLE + LOGIN PERMISSSION
 
 `CREATE ROLE` adds a new role to a PostgreSQL database cluster. A role is an entity that can own database objects and have database privileges. You must have CREATE ROLE privilege or be a database superuser to use this command.
 
@@ -622,6 +651,36 @@ psql (14.5 (Debian 14.5-1.pgdg110+1))
 Type "help" for help.
 ```
 
+##### Some actions result
+
+Alice can't create database
+```sql
+gorm=> CREATE DATABASE alice;
+ERROR:  permission denied to create database
+```
+Alice can create table. Because a role when created get public role and public role can create table in public schema of any database. 
+```sql
+gorm=> create table gorm_table (
+gorm(>     name text
+gorm(> );
+CREATE TABLE
+```
+But alice can't read, update or delete other tables not owned by it.
+```sql
+gorm=> \d
+           List of relations
+ Schema |    Name    | Type  |  Owner   
+--------+------------+-------+----------
+ public | empsalary  | table | postgres
+ public | gorm_table | table | alice
+ public | people     | table | postgres
+ public | route      | table | postgres
+ public | weather    | table | postgres
+(5 rows)
+gorm=> SELECT * FROM empsalary;
+ERROR:  permission denied for table empsalary
+```
+
 #### Drop roles
 ```sql
 DROP ROLE role_name;
@@ -645,6 +704,138 @@ Change to other user as
 postgres=> \c - bob
 Password for user bob: 
 You are now connected to database "postgres" as user "bob".
+```
+
+#### Practice Role and User creation
+Generally when we create a table it is created under public schema of the connected database.
+
+```sql
+SELECT 
+      r.rolname, 
+      ARRAY(SELECT b.rolname
+            FROM pg_catalog.pg_auth_members m
+            JOIN pg_catalog.pg_roles b ON (m.roleid = b.oid)
+            WHERE m.member = r.oid) as memberof
+FROM pg_catalog.pg_roles r
+WHERE r.rolname NOT IN ('pg_signal_backend','rds_iam',
+                        'rds_replication','rds_superuser',
+                        'rdsadmin','rdsrepladmin')
+ORDER BY 1;
+          rolname          |                           memberof                           
+---------------------------+--------------------------------------------------------------
+ alice                     | {}
+ bob                       | {}
+ pg_database_owner         | {}
+ pg_execute_server_program | {}
+ pg_monitor                | {pg_read_all_settings,pg_read_all_stats,pg_stat_scan_tables}
+ pg_read_all_data          | {}
+ pg_read_all_settings      | {}
+ pg_read_all_stats         | {}
+ pg_read_server_files      | {}
+ pg_stat_scan_tables       | {}
+ pg_write_all_data         | {}
+ pg_write_server_files     | {}
+ postgres                  | {}
+(13 rows)
+
+
+                                 List of databases
+   Name    |  Owner   | Encoding |  Collate   |   Ctype    |   Access privileges   
+-----------+----------+----------+------------+------------+-----------------------
+ mydb      | postgres | UTF8     | en_US.utf8 | en_US.utf8 | 
+ postgres  | postgres | UTF8     | en_US.utf8 | en_US.utf8 | 
+ template0 | postgres | UTF8     | en_US.utf8 | en_US.utf8 | =c/postgres          +
+           |          |          |            |            | postgres=CTc/postgres
+ template1 | postgres | UTF8     | en_US.utf8 | en_US.utf8 | =c/postgres          +
+           |          |          |            |            | postgres=CTc/postgres
+(4 rows)
+-- remove create access of PUBLIC from public schema of database mydb
+mydb=# REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE
+-- remove all permission on database mydb from public
+mydb=# REVOKE ALL ON DATABASE mydb FROM PUBLIC;
+REVOKE
+```
+If you are trying to create a `read-only` user. Even if you restrict all privileges, the permissions inherited via the `public` role allow the user to create objects in the public schema.
+
+To fix this, you should revoke the default create permission on the `public schema` from the `public role` using the following SQL statement `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`
+Make sure that you are the owner of the public schema or are part of a role that allows you to run this SQL statement.
+
+The following statement revokes the public role’s ability to connect to the database: `REVOKE ALL ON DATABASE mydb FROM PUBLIC;`
+
+#### Privilages are given in below order
+Database > Schema > Table > Row
+
+#### Create Read Only Role
+```sql
+CREATE ROLE readonly;
+```
+This is a base role with no permissions and no password. It cannot be used to log in to the database. Grant this role permission to connect to your target database named `mydb`:
+```sql
+GRANT CONNECT ON DATABASE mydb TO readonly;
+```
+The next step is to grant this role usage access to your schema. Let’s assume the schema is named `myschema`. This step grants the readonly role permission to perform some activity inside the schema.
+```sql
+GRANT USAGE ON SCHEMA myschema TO readonly;
+
+mydb=# \du
+                                   List of roles
+ Role name |                         Attributes                         | Member of 
+-----------+------------------------------------------------------------+-----------
+ postgres  | Superuser, Create role, Create DB, Replication, Bypass RLS | {}
+ readonly  | Cannot login                                               | {}
+```
+Look the role can't login. Because the roles are not for login purpose but users are. So this role is just to define a policy and user will use this roles access.
+
+The next step is to grant the `readonly` role access to run select on the required tables.
+```sql
+mydb=# CREATE TABLE mytable1 (name text);
+CREATE TABLE
+mydb=# CREATE TABLE mytable2 (name text);
+CREATE TABLE
+mydb=# 
+mydb=# \d
+          List of relations
+ Schema |   Name   | Type  |  Owner   
+--------+----------+-------+----------
+ public | mytable1 | table | postgres
+ public | mytable2 | table | postgres
+(2 rows)
+```
+```sql
+GRANT SELECT ON TABLE mytable1, mytable2 TO readonly;
+```
+The preceding SQL statement grants SELECT access to the readonly role on all the existing tables and views in the schema myschema. Note that any new tables that get added in the future will not be accessible by the readonly user. To help ensure that new tables and views are also accessible, run the following statement to grant permissions automatically:
+```sql
+ALTER DEFAULT PRIVILEGES IN SCHEMA myschema GRANT SELECT ON TABLES TO readonly;
+```
+
+#### Create Read Write Role
+```sql
+CREATE ROLE readwrite;
+GRANT CONNECT ON DATABASE mydb TO readwrite;
+GRANT USAGE, CREATE ON SCHEMA myschema TO readwrite;    -- for access and create of object in schema
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE mytable1, mytable2 TO readwrite;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA myschema TO readwrite;
+ALTER DEFAULT PRIVILEGES IN SCHEMA myschema GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO readwrite;
+```
+
+#### Creating DB User
+```sql
+mydb=# CREATE USER myuser1 WITH PASSWORD 'secret_passwd';
+CREATE ROLE
+mydb=# 
+mydb=# GRANT readonly TO myuser1;
+GRANT ROLE
+```
+
+```sql
+          rolname          |                           memberof                           
+---------------------------+--------------------------------------------------------------
+ myuser1                   | {readonly}
+ postgres                  | {}
+ readonly                  | {}
+ readwrite                 | {}
 ```
 
 ## Check and Kill the stale process and connection
@@ -732,4 +923,24 @@ gorm=# \z
  public | route     | table |                   |                   | 
  public | weather   | table |                   |                   | 
 (4 rows)
+
+-- Get all schemas name
+mydb=# \dn
+   List of schemas
+   Name   |  Owner   
+----------+----------
+ myschema | postgres
+ public   | postgres
+(2 rows)
 ```
+
+## Row Security Policies
+When row security is enabled on a table (with `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`), all normal access to the table for selecting rows or modifying rows must be allowed by a row security policy. (However, the table's owner is typically not subject to row security policies.) If no policy exists for the table, a default-deny policy is used, meaning that no rows are visible or can be modified. Operations that apply to the whole table, such as TRUNCATE and REFERENCES, are not subject to row security.
+
+Row security policies can be specific to commands, or to roles, or to both. A policy can be specified to apply to ALL commands, or to SELECT, INSERT, UPDATE, or DELETE. Multiple roles can be assigned to a given policy, and normal role membership and inheritance rules apply.
+
+Superusers and roles with the BYPASSRLS attribute always bypass the row security system when accessing a table. Table owners normally bypass row security as well, though a table owner can choose to be subject to row security with `ALTER TABLE ... FORCE ROW LEVEL SECURITY`.
+
+Enabling and disabling row security, as well as adding policies to a table, is always the privilege of the table owner only.
+
+Policies are created using the `CREATE POLICY` command, altered using the `ALTER POLICY` command, and dropped using the `DROP POLICY` command. To enable and disable row security for a given table, use the `ALTER TABLE` command.
