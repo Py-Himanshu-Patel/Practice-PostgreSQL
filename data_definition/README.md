@@ -89,7 +89,7 @@ PostgreSQL assumes that CHECK constraints' conditions are immutable, that is, th
 
 An example of a common way to break this assumption is to reference a user-defined function in a CHECK expression, and then change the behavior of that function. PostgreSQL does not disallow that, but it will not notice if there are rows in the table that now violate the CHECK constraint. That would cause a subsequent database dump and restore to fail. The recommended way to handle such a change is to drop the constraint (using ALTER TABLE), adjust the function definition, and re-add the constraint, thereby rechecking it against all table rows.
 
-## Not-Null Constraints
+### Not-Null Constraints
 ```sql
 CREATE TABLE products (
     product_no integer NOT NULL,
@@ -99,7 +99,7 @@ CREATE TABLE products (
 ```
 A not-null constraint is always written as a column constraint. A not-null constraint is functionally equivalent to creating a check constraint CHECK (column_name IS NOT NULL), but in PostgreSQL creating an explicit not-null constraint is more efficient. The drawback is that you cannot give explicit names to not-null constraints created this way.
 
-## Unique Constraints
+### Unique Constraints
 Unique constraints ensure that the data contained in a column, or a group of columns, is unique among all the rows in the table. 
 ```sql
 -- column constraint
@@ -286,3 +286,450 @@ A foreign key must reference columns that either are a primary key or form a uni
 
 Since a DELETE of a row from the referenced table or an UPDATE of a referenced column will require a scan of the referencing table for rows matching the old value, it is often a good idea to index the referencing columns too.
 
+
+## System Columns
+Every table has several system columns that are implicitly defined by the system. Therefore, these names cannot be used as names of user-defined columns. You do not really need to be concerned about these columns; just know they exist.
+
+## Modifying Tables
+
+### Adding a Column
+
+```sql
+gorm=# select * from people;
+ height_cm |     height_in      
+-----------+--------------------
+         3 | 1.1811023622047244
+         4 | 1.5748031496062992
+         5 | 1.9685039370078740
+```
+
+Add a text column to above table
+```sql
+gorm=# ALTER TABLE people ADD COLUMN description text;
+```
+
+```sql
+gorm=# select * from people;
+ height_cm |     height_in      | description 
+-----------+--------------------+-------------
+         3 | 1.1811023622047244 | 
+         4 | 1.5748031496062992 | 
+         5 | 1.9685039370078740 | 
+```
+
+The new column is initially filled with whatever default value is given (null if you don't specify a DEFAULT clause).
+
+#### TIP
+From PostgreSQL 11, adding a column with a constant default value no longer means that each row of the table needs to be updated when the ALTER TABLE statement is executed. Instead, the default value will be returned the next time the row is accessed, and applied when the table is rewritten, making the ALTER TABLE very fast even on large tables.
+
+However, if the default value is volatile (e.g., clock_timestamp()) each row will need to be updated with the value calculated at the time ALTER TABLE is executed. To avoid a potentially lengthy update operation, particularly if you intend to fill the column with mostly nondefault values anyway, it may be preferable to add the column with no default, insert the correct values using UPDATE, and then add any desired default as described below.
+
+You can also define constraints on the column at the same time, using the usual syntax:
+```sql
+ALTER TABLE products ADD COLUMN description text CHECK (description <> '');
+```
+
+### Removing a Column
+```sql
+gorm=# ALTER TABLE people DROP COLUMN DESCRIPTION;
+ALTER TABLE
+gorm=# 
+gorm=# select * from people;
+ height_cm |     height_in      
+-----------+--------------------
+         3 | 1.1811023622047244
+         4 | 1.5748031496062992
+         5 | 1.9685039370078740
+(3 rows)
+```
+Table constraints involving the column are dropped, too. However, if the column is referenced by a foreign key constraint of another table, PostgreSQL will not silently drop that constraint. You can authorize dropping everything that depends on the column by adding `CASCADE`:
+```sql
+ALTER TABLE people DROP COLUMN description CASCADE;
+```
+
+### Adding a Constraint
+```sql
+ALTER TABLE products ADD CHECK (name <> '');
+ALTER TABLE products ADD CONSTRAINT some_name UNIQUE (product_no);
+ALTER TABLE products ADD FOREIGN KEY (product_group_id) REFERENCES product_groups;
+```
+To add a not-null constraint, which cannot be written as a table constraint, use this syntax:
+```sql
+ALTER TABLE products ALTER COLUMN product_no SET NOT NULL;
+```
+
+When ever we put any constaint it is verified then and there. So data should be clean up before we apply that constaint.
+
+### Removing a Constraint
+To remove a constraint you need to know its name. If you gave it a name then that's easy. Otherwise the system assigned a generated name, which you need to find out. 
+
+The psql command `\d tablename` can be helpful here
+```sql
+gorm=# \d cities
+                       Table "public.cities"
+  Column  |         Type          | Collation | Nullable | Default 
+----------+-----------------------+-----------+----------+---------
+ name     | character varying(80) |           | not null | 
+ location | point                 |           |          | 
+Indexes:
+    "cities_pkey" PRIMARY KEY, btree (name)
+Referenced by:
+    TABLE "weather" CONSTRAINT "weather_city_fkey" FOREIGN KEY (city) REFERENCES cities(name)
+```
+Syntax is
+```sql
+ALTER TABLE products DROP CONSTRAINT some_name;
+```
+
+(If you are dealing with a generated constraint name like $2, don't forget that you'll need to double-quote it to make it a valid identifier.)
+
+As with dropping a column, you need to add CASCADE if you want to drop a constraint that something else depends on. An example is that a foreign key constraint depends on a unique or primary key constraint on the referenced column(s).
+
+```sql
+gorm=# ALTER TABLE cities DROP CONSTRAINT cities_pkey;
+ERROR:  cannot drop constraint cities_pkey on table cities because other objects depend on it
+DETAIL:  constraint weather_city_fkey on table weather depends on index cities_pkey
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+```
+Then go for this
+```sql
+gorm=# ALTER TABLE cities DROP CONSTRAINT cities_pkey CASCADE;
+NOTICE:  drop cascades to constraint weather_city_fkey on table weather
+ALTER TABLE
+```
+
+### Changing a Column's Data Type
+```sql
+ALTER TABLE products ALTER COLUMN price TYPE numeric(10,2);
+```
+This will succeed only if each existing entry in the column can be converted to the new type by an implicit cast. If a more complex conversion is needed, you can add a USING clause that specifies how to compute the new values from the old.
+
+```sql
+gorm=# select * from cities;
+   name    | location 
+-----------+----------
+ Hyderabad | (1,2)
+ Jaipur    | (1,1)
+ Hyderabad | (5,6)
+```
+```sql
+gorm=# ALTER TABLE cities ALTER COLUMN location TYPE INTEGER;
+ERROR:  column "location" cannot be cast automatically to type integer
+HINT:  You might need to specify "USING location::integer".
+```
+```sql
+gorm=# ALTER TABLE cities ALTER COLUMN location TYPE INTEGER USING location::integer;
+ERROR:  cannot cast type point to integer
+LINE 1: ... alter column location type integer using location::integer;
+```
+```sql
+gorm=# 
+gorm=# ALTER TABLE cities ALTER COLUMN location TYPE INTEGER USING location[0]+location[1]::integer;
+ALTER TABLE
+gorm=# select * from cities;
+   name    | location 
+-----------+----------
+ Hyderabad |        3
+ Jaipur    |        2
+ Hyderabad |       11
+(3 rows)
+```
+
+### Renaming a Column
+```sql
+ALTER TABLE cities RENAME COLUMN location TO distance;
+ALTER TABLE
+gorm=# select * from cities;
+   name    | distance 
+-----------+----------
+ Hyderabad |        3
+ Jaipur    |        2
+ Hyderabad |       11
+(3 rows)
+```
+
+### Renaming a Table
+```sql
+ALTER TABLE cities RENAME TO route;
+gorm=# select * from route;
+   name    | distance 
+-----------+----------
+ Hyderabad |        3
+ Jaipur    |        2
+ Hyderabad |       11
+(3 rows)
+```
+
+## Privileges
+When an object is created, it is assigned an owner. The owner is normally the role that executed the creation statement. For most kinds of objects, the initial state is that only the owner (or a superuser) can do anything with the object. To allow other roles to use it, privileges must be granted.
+
+There are different kinds of privileges: SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, CREATE, CONNECT, TEMPORARY, EXECUTE, USAGE, SET and ALTER SYSTEM. 
+
+The right to modify or destroy an object is inherent in being the object's owner, and cannot be granted or revoked in itself. (However, like all privileges, that right can be inherited by members of the owning role
+
+An object can be assigned to a new owner with an ALTER command of the appropriate kind for the object, for example
+```sql
+ALTER TABLE table_name OWNER TO new_owner;
+```
+Superusers can always do this; ordinary roles can only do it if they are both the current owner of the object (or a member of the owning role) and a member of the new owning role.
+
+
+
+---
+
+### Look Roles
+```sql
+gorm=# select * from pg_roles;
+          rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolconnlimit | rolpassword | rolvaliduntil | rolbypassrls | rolconfig |  oid  
+---------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+-------------+---------------+--------------+-----------+-------
+ pg_database_owner         | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  6171
+ pg_read_all_data          | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  6181
+ pg_write_all_data         | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  6182
+ pg_monitor                | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  3373
+ pg_read_all_settings      | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  3374
+ pg_read_all_stats         | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  3375
+ pg_stat_scan_tables       | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  3377
+ pg_read_server_files      | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  4569
+ pg_write_server_files     | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  4570
+ pg_execute_server_program | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  4571
+ pg_signal_backend         | f        | t          | f             | f           | f           | f              |           -1 | ********    |               | f            |           |  4200
+ postgres                  | t        | t          | t             | t           | t           | t              |           -1 | ********    |               | t            |           |    10
+```
+
+Another way to get user roles in PSQL
+```sql
+gorm=# \du
+                                   List of roles
+ Role name |                         Attributes                         | Member of 
+-----------+------------------------------------------------------------+-----------
+ postgres  | Superuser, Create role, Create DB, Replication, Bypass RLS | {}
+```
+Noice that the roles that start with with `pg_` are system roles.
+
+### Create Roles
+
+`CREATE ROLE` adds a new role to a PostgreSQL database cluster. A role is an entity that can own database objects and have database privileges. You must have CREATE ROLE privilege or be a database superuser to use this command.
+
+```sql
+# CREATE ROLE bob;
+```
+```sql
+gorm=# \du
+                                   List of roles
+ Role name |                         Attributes                         | Member of 
+-----------+------------------------------------------------------------+-----------
+ bob       | Cannot login                                               | {}
+ postgres  | Superuser, Create role, Create DB, Replication, Bypass RLS | {}
+```
+```
+root@fd01a645f479:/# psql -U bob
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" 
+failed: FATAL:  role "bob" is not permitted to log in
+```
+
+#### Create login roles
+```sql
+gorm=# CREATE ROLE alice LOGIN;
+CREATE ROLE
+gorm=# \du
+                                   List of roles
+ Role name |                         Attributes                         | Member of 
+-----------+------------------------------------------------------------+-----------
+ alice     |                                                            | {}
+ bob       | Cannot login                                               | {}
+ postgres  | Superuser, Create role, Create DB, Replication, Bypass RLS | {}
+```
+Try login 
+```bash
+$ psql -U alice
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" 
+failed: FATAL:  database "alice" does not exist
+# error because by default the command above will try connecting to DB named after the user 
+# i.e. alice DB.Since we don't have one, either we can create one (befoe alice connect) or 
+# we can specify the DB to connect to.
+$ psql -U alice -d postgres
+psql (14.5 (Debian 14.5-1.pgdg110+1))
+Type "help" for help.
+postgres=> 
+```
+To put password auth on user login. First drop the role we created and then recreate as follow.
+```sql
+gorm=# CREATE ROLE alice LOGIN PASSWORD 'alicepass';
+CREATE ROLE
+gorm=# \du
+                                   List of roles
+ Role name |                         Attributes                         | Member of 
+-----------+------------------------------------------------------------+-----------
+ alice     |                                                            | {}
+ postgres  | Superuser, Create role, Create DB, Replication, Bypass RLS | {}
+```
+But this is not enough to make sure user is prompted for password. We need to ensure 3 things.
+1. Make `PGPASSWORD` env variable as empty (in docker container). or else we can save the user password in this env var which get used to each login without password prompt.
+```
+echo $PGPASSWORD
+
+```
+2. Remove `.pgpass` in `/home` location. This file fetch the password store in it without password prompt.
+```
+# hostname:port:database:username:password
+*:*:*:postgres:admin
+```
+Pass here is stored as plain text.
+3. Make `md5` entry instead of `trust` in file `pg_hba.conf`.
+```
+root@fd01a645f479:/# cd /var/lib/postgresql/data/
+root@fd01a645f479:/var/lib/postgresql/data# ls
+base	      pg_hba.conf    pg_notify	   pg_stat	pg_twophase  postgresql.auto.conf
+global	      pg_ident.conf  pg_replslot   pg_stat_tmp	PG_VERSION   postgresql.conf
+pg_commit_ts  pg_logical     pg_serial	   pg_subtrans	pg_wal	     postmaster.opts
+pg_dynshmem   pg_multixact   pg_snapshots  pg_tblspc	pg_xact      postmaster.pid
+root@fd01a645f479:/var/lib/postgresql/data# vi pg_hba.conf
+```
+The rules are matched from top. First one that match is used. Change for local Unix Domain from truct to md5.
+```
+# "local" is for Unix domain socket connections only
+local   all             all                                     md5
+# IPv4 local connections:
+host    all             all             127.0.0.1/32            trust
+# IPv6 local connections:
+host    all             all             ::1/128                 trust
+# Allow replication connections from localhost, by a user with the
+# replication privilege.
+local   replication     all                                     trust
+host    replication     all             127.0.0.1/32            trust
+host    replication     all             ::1/128                 trust
+
+host all all all scram-sha-256
+```
+Then either restart the postgres service
+```
+sudo service postgresql restart 
+```
+OR, just resource the config inside the Database
+Login without password and resource config
+```
+# select pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+```
+After this logout and try login again. You will be asked for user password.
+```
+root@fd01a645f479:/# psql -U alice -d postgres
+Password for user alice: 
+psql (14.5 (Debian 14.5-1.pgdg110+1))
+Type "help" for help.
+```
+
+#### Drop roles
+```sql
+DROP ROLE role_name;
+```
+
+#### Check Current User and Change Roles
+```sql
+postgres=> SELECT current_user;
+ current_user 
+--------------
+ alice
+(1 row)
+```
+Another way is 
+```sql
+postgres=> \conninfo
+You are connected to database "postgres" as user "alice" via socket in "/var/run/postgresql" at port "5432".
+```
+Change to other user as
+```sql
+postgres=> \c - bob
+Password for user bob: 
+You are now connected to database "postgres" as user "bob".
+```
+
+## Check and Kill the stale process and connection
+Check all the process running in DB
+```sql
+gorm=# SELECT pid, usename, datname, query FROM pg_stat_activity; 
+ pid  | usename  | datname |                           query                            
+------+----------+---------+------------------------------------------------------------
+   31 |          |         | 
+   33 | postgres |         | 
+ 2022 | alice    | alice   | 
+   72 | postgres | gorm    | SELECT pid, usename, datname, query FROM pg_stat_activity;
+ 2136 | alice    | alice   | 
+   29 |          |         | 
+   28 |          |         | 
+   30 |          |         | 
+(8 rows)
+```
+Each time we fire above query this is also a process
+```sql
+gorm=# select pg_backend_pid();
+ pg_backend_pid 
+----------------
+             72
+(1 row)
+```
+Lets get all the process except this one
+```sql
+gorm=# SELECT pid, usename, datname, query FROM pg_stat_activity WHERE pid <> pg_backend_pid(); 
+ pid  | usename  | datname | query 
+------+----------+---------+-------
+   31 |          |         | 
+   33 | postgres |         | 
+ 2022 | alice    | alice   | 
+ 2136 | alice    | alice   | 
+   29 |          |         | 
+   28 |          |         | 
+   30 |          |         | 
+(7 rows)
+```
+Kill one process
+```sql
+gorm=# SELECT pg_terminate_backend(2136);
+ pg_terminate_backend 
+----------------------
+ t
+(1 row)
+```
+Similarly Kill all irrelevant process
+```sql
+gorm=# SELECT pid, usename, datname, query, pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid(); 
+WARNING:  PID 29 is not a PostgreSQL server process
+WARNING:  PID 28 is not a PostgreSQL server process
+WARNING:  PID 30 is not a PostgreSQL server process
+ pid  | usename  | datname | query | pg_terminate_backend 
+------+----------+---------+-------+----------------------
+ 2261 |          |         |       | t
+ 2263 | postgres |         |       | t
+   29 |          |         |       | f
+   28 |          |         |       | f
+   30 |          |         |       | f
+(5 rows)
+```
+
+This will remove the old stale connection
+```sql
+gorm=# DROP DATABASE alice;
+
+ERROR:  database "alice" is being accessed by other users
+DETAIL:  There are 2 other sessions using the database.
+```
+```sql
+gorm=# DROP DATABASE alice;
+DROP DATABASE
+```
+
+### Getting Schema name and table/relation in those schema
+```sql
+gorm=# \z
+                               Access privileges
+ Schema |   Name    | Type  | Access privileges | Column privileges | Policies 
+--------+-----------+-------+-------------------+-------------------+----------
+ public | empsalary | table |                   |                   | 
+ public | people    | table |                   |                   | 
+ public | route     | table |                   |                   | 
+ public | weather   | table |                   |                   | 
+(4 rows)
+```
